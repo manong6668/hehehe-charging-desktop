@@ -1,0 +1,110 @@
+name: Build Hehe Charging desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore:
+      - .github/workflows/import-source.yml
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm verify:distribution
+      - run: pnpm test:unit tests/lib/agentInstall.test.ts tests/lib/agentFirstLaunch.test.ts tests/components/RoutingActivationBrand.test.tsx tests/utils/errorUtils.test.ts tests/integration/SettingsDialog.test.tsx tests/integration/App.test.tsx --maxWorkers=2 --minWorkers=1
+      - run: pnpm build:renderer
+
+  build:
+    needs: verify
+    name: Build ${{ matrix.platform }} ${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows
+            architecture: x64
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - runner: macos-15
+            platform: macos
+            architecture: aarch64
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - runner: macos-15-intel
+            platform: macos
+            architecture: x64
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+      - run: pnpm install --frozen-lockfile
+      - name: Verify distribution configuration
+        run: pnpm verify:distribution
+      - name: Build unsigned preview installers
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --no-sign
+      - name: Collect installers and hashes
+        run: node scripts/collect-installers.mjs src-tauri/target/${{ matrix.target }}/release/bundle installers ${{ matrix.platform }} ${{ matrix.architecture }}
+      - name: Inspect actual MSI uninstall scope
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./scripts/verify-windows-package.ps1 -PackagePath installers/HeheCharging_1.0.0_x64.msi | Out-File installers/windows-package-inspection.json -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HeheCharging-${{ matrix.platform }}-${{ matrix.architecture }}
+          path: installers/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - name: Publish preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" installers/* --prerelease --title "禾禾充电桩 $RELEASE_TAG" --notes-file docs/hehehe-preview-release.md
