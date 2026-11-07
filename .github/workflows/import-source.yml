@@ -1,0 +1,62 @@
+name: Import verified Hehe Charging source
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/import-source.yml]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: import-hehe-source
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Download and verify reviewed source archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/hehe-source"
+          gh release download source-import-1.0.0 --pattern HeheCharging-source-1.0.0.zip --dir "$RUNNER_TEMP/hehe-source"
+          cd "$RUNNER_TEMP/hehe-source"
+          echo 'ee2d2fb77b9177463cb80c6448cd97610de910f4fdd3d4d9b1ddaa65c7b3c047  HeheCharging-source-1.0.0.zip' | sha256sum --check
+          unzip -q HeheCharging-source-1.0.0.zip -d unpacked
+      - name: Import complete source while preserving configured workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --exclude '.git/' --exclude '.github/workflows/' "$RUNNER_TEMP/hehe-source/unpacked/" ./
+          test -f LICENSE
+          test -f src-tauri/Cargo.lock
+          test -f pnpm-lock.yaml
+          node scripts/verify-distribution.mjs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          if ! git diff --cached --quiet; then
+            git commit -m 'Import verified Hehe Charging desktop source'
+            git push origin HEAD:main
+          fi
+      - name: Tag imported source and start all platform builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify refs/tags/v1.0.0 >/dev/null 2>&1; then
+            git tag v1.0.0
+            git push origin refs/tags/v1.0.0
+          fi
+          gh workflow run desktop-build.yml --ref v1.0.0
